@@ -1,6 +1,6 @@
 # Kiro Claude Proxy
 
-#upd Sunday, June 14, 2026 8:40 PM
+# upd Sunday, June 14, 2026 8:40 PM
 [/] fixed grabbing auth files
 [+] added 4.7, 4.8 opus/sonnet/haiku models
 [+] added support for tools using(it was broken ig)
