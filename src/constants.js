@@ -5,21 +5,42 @@
 
 import { homedir, platform, arch } from 'os';
 import { join } from 'path';
+import { existsSync } from 'fs';
 
 /**
- * Get the Kiro CLI database path based on the current platform.
- * Kiro stores OAuth tokens in SQLite database similar to VS Code extensions.
+ * Get the candidate Kiro CLI database paths based on the current platform.
+ * Kiro stores OAuth tokens in a SQLite database. The exact location varies
+ * across platforms and CLI versions, so we return all known candidates.
  */
-function getKiroDbPath() {
+function getKiroDbCandidates() {
     const home = homedir();
     switch (platform()) {
         case 'darwin':
-            return join(home, 'Library/Application Support/kiro-cli/data.sqlite3');
+            return [
+                join(home, 'Library/Application Support/kiro-cli/data.sqlite3')
+            ];
         case 'win32':
-            return join(home, 'AppData/Roaming/kiro-cli/data.sqlite3');
+            // Newer Kiro CLI builds store data under Local; older ones used Roaming.
+            return [
+                join(home, 'AppData/Local/kiro-cli/data.sqlite3'),
+                join(home, 'AppData/Roaming/kiro-cli/data.sqlite3')
+            ];
         default: // linux, freebsd, etc.
-            return join(home, '.config/kiro-cli/data.sqlite3');
+            return [
+                join(home, '.local/share/kiro-cli/data.sqlite3'),
+                join(home, '.config/kiro-cli/data.sqlite3')
+            ];
     }
+}
+
+/**
+ * Resolve the Kiro CLI database path, preferring the first candidate that
+ * actually exists. Falls back to the first candidate so error messages stay
+ * meaningful when nothing is found.
+ */
+function getKiroDbPath() {
+    const candidates = getKiroDbCandidates();
+    return candidates.find(existsSync) || candidates[0];
 }
 
 // Basic configuration
@@ -57,6 +78,15 @@ export const KIRO_DEFAULT_REGION = 'us-east-1';
 // Kiro model mappings (Claude model names to Kiro's internal model IDs)
 export const KIRO_MODEL_MAPPING = {
     // Claude models - map Anthropic names to Kiro internal IDs
+    'claude-opus-4-8': 'claude-opus-4.8',
+    'claude-opus-4-8-thinking': 'claude-opus-4.8',
+    'claude-opus-4-7': 'claude-opus-4.7',
+    'claude-opus-4-7-thinking': 'claude-opus-4.7',
+    'claude-sonnet-4-8': 'claude-sonnet-4.8',
+    'claude-sonnet-4-8-thinking': 'claude-sonnet-4.8',
+    'claude-sonnet-4-7': 'claude-sonnet-4.7',
+    'claude-sonnet-4-7-thinking': 'claude-sonnet-4.7',
+    'claude-haiku-4-7': 'claude-haiku-4.7',
     'claude-opus-4-6': 'claude-opus-4.6',
     'claude-opus-4-6-thinking': 'claude-opus-4.6',
     'claude-sonnet-4-5': 'claude-sonnet-4.5',

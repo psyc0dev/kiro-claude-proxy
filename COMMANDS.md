@@ -86,8 +86,14 @@ kiro --help                          # Verify Kiro CLI is installed
 
 ## Available Models
 
+- `claude-opus-4-8` (default)
+- `claude-opus-4-7`
+- `claude-opus-4-6`
 - `claude-opus-4-5`
+- `claude-sonnet-4-8`
+- `claude-sonnet-4-7`
 - `claude-sonnet-4-5` 
 - `claude-sonnet-4`
+- `claude-haiku-4-7`
 - `claude-haiku-4-5`
 - `auto`

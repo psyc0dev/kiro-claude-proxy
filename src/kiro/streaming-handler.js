@@ -118,94 +118,204 @@ export async function* sendKiroMessageStream(anthropicRequest) {
 }
 
 /**
- * Stream and parse Kiro event stream response using AWS binary format
+ * Stream and parse Kiro event stream response using AWS binary format.
+ * Tracks text and tool-use content blocks, accumulating partial tool input
+ * across events so tool calls are emitted as proper Anthropic tool_use blocks.
  * @param {Response} response - The fetch response
  * @param {string} requestModel - The original model requested
  * @yields {Object} Anthropic-format SSE events
  */
 async function* streamKiroResponse(response, requestModel) {
     const messageId = `msg_${crypto.randomUUID().replace(/-/g, '').substring(0, 24)}`;
-    let contentBlockIndex = 0;
     let hasStarted = false;
-    let hasOpenBlock = false;
-    let inputTokens = 0;
+    let nextIndex = 0;
     let outputTokens = 0;
-    
-    try {
-        // Use the async event stream parser for streaming
-        for await (const event of parseEventStreamAsync(response.body)) {
-            // Emit message_start on first event
-            if (!hasStarted) {
-                hasStarted = true;
-                yield {
-                    type: 'message_start',
-                    message: {
-                        id: messageId,
-                        type: 'message',
-                        role: 'assistant',
-                        model: requestModel,
-                        content: [],
-                        stop_reason: null,
-                        stop_sequence: null,
-                        usage: { input_tokens: 0, output_tokens: 0 }
-                    }
-                };
-                
-                // Start the first content block
-                yield {
-                    type: 'content_block_start',
-                    index: contentBlockIndex,
-                    content_block: { type: 'text', text: '' }
-                };
-                hasOpenBlock = true;
-            }
-            
-            // Convert Kiro event to Anthropic format
-            const anthropicEvents = convertKiroEventToAnthropic(event, contentBlockIndex, hasOpenBlock);
-            
-            for (const evt of anthropicEvents) {
-                if (evt) {
-                    // Track content block changes
-                    if (evt.type === 'content_block_start') {
-                        hasOpenBlock = true;
-                    }
-                    if (evt.type === 'content_block_stop') {
-                        hasOpenBlock = false;
-                    }
-                    
-                    // Track token usage
-                    if (evt.usage) {
-                        inputTokens = evt.usage.input_tokens || inputTokens;
-                        outputTokens = evt.usage.output_tokens || outputTokens;
-                    }
-                    
-                    yield evt;
-                }
-            }
-        }
-        
-        // Close any open content block
-        if (hasOpenBlock) {
-            yield {
-                type: 'content_block_stop',
-                index: contentBlockIndex
-            };
-        }
-        
-        // Emit message_delta with stop reason
-        yield {
-            type: 'message_delta',
-            delta: {
-                stop_reason: 'end_turn',
-                stop_sequence: null
-            },
-            usage: {
-                output_tokens: outputTokens
+    let inputTokens = 0;
+    let stopReason = 'end_turn';
+
+    // Current non-tool block: 'thinking' | 'text' | null
+    let currentType = null;
+    let currentIndex = -1;
+
+    // Tool block state: toolUseId -> content block index
+    const toolBlocks = new Map();
+
+    function startMessage() {
+        return {
+            type: 'message_start',
+            message: {
+                id: messageId,
+                type: 'message',
+                role: 'assistant',
+                model: requestModel,
+                content: [],
+                stop_reason: null,
+                stop_sequence: null,
+                usage: { input_tokens: 0, output_tokens: 0 }
             }
         };
-        
+    }
+
+    try {
+        for await (const event of parseEventStreamAsync(response.body)) {
+            if (logger.isDebugEnabled) {
+                logger.debug(`[Kiro] Raw event: ${JSON.stringify(event)}`);
+            }
+            if (!hasStarted) {
+                hasStarted = true;
+                yield startMessage();
+            }
+
+            // --- Tool use events ------------------------------------------
+            // CodeWhisperer emits these flat: { name, toolUseId, input?, stop? }.
+            // Also accept legacy wrapped forms (toolUseEvent / toolUse).
+            const toolUse = event.toolUseEvent || event.toolUse ||
+                (event.toolUseId !== undefined ? event : null);
+            if (toolUse) {
+                stopReason = 'tool_use';
+
+                // Close any open text/thinking block before the tool block
+                if (currentType !== null) {
+                    yield { type: 'content_block_stop', index: currentIndex };
+                    currentType = null;
+                    currentIndex = -1;
+                }
+
+                const toolId = toolUse.toolUseId;
+
+                // Open a new tool_use block the first time we see this id
+                if (toolId !== undefined && !toolBlocks.has(toolId)) {
+                    const newIdx = nextIndex++;
+                    toolBlocks.set(toolId, newIdx);
+                    yield {
+                        type: 'content_block_start',
+                        index: newIdx,
+                        content_block: {
+                            type: 'tool_use',
+                            id: toolId,
+                            name: toolUse.name || 'tool',
+                            input: {}
+                        }
+                    };
+                }
+
+                const idx = toolBlocks.get(toolId);
+
+                // Forward partial JSON input verbatim (it arrives in string chunks)
+                if (idx !== undefined &&
+                    toolUse.input !== undefined && toolUse.input !== null && toolUse.input !== '') {
+                    const partial = typeof toolUse.input === 'string'
+                        ? toolUse.input
+                        : JSON.stringify(toolUse.input);
+                    yield {
+                        type: 'content_block_delta',
+                        index: idx,
+                        delta: { type: 'input_json_delta', partial_json: partial }
+                    };
+                }
+
+                // Close the tool block when the model signals completion
+                if (toolUse.stop && idx !== undefined) {
+                    yield { type: 'content_block_stop', index: idx };
+                    toolBlocks.delete(toolId);
+                }
+                continue;
+            }
+
+            // --- Token usage metadata -------------------------------------
+            const usage = event.metadataEvent?.tokenUsage || event.tokenUsage;
+            if (usage) {
+                inputTokens = usage.inputTokens || inputTokens;
+                outputTokens = usage.outputTokens || outputTokens;
+                continue;
+            }
+            // Credit/usage metering and context stats - log/skip, not token counts
+            if (event.usage !== undefined && event.unit !== undefined) {
+                logger.debug(`[Kiro] Usage: ${event.usage} ${event.unitPlural || event.unit}`);
+                continue;
+            }
+            if (event.contextUsagePercentage !== undefined) {
+                continue;
+            }
+
+            // --- Extended thinking deltas (event.text) --------------------
+            if (typeof event.text === 'string' && event.text.length > 0) {
+                if (currentType !== 'thinking') {
+                    if (currentType !== null) {
+                        yield { type: 'content_block_stop', index: currentIndex };
+                    }
+                    currentIndex = nextIndex++;
+                    currentType = 'thinking';
+                    yield {
+                        type: 'content_block_start',
+                        index: currentIndex,
+                        content_block: { type: 'thinking', thinking: '' }
+                    };
+                }
+                yield {
+                    type: 'content_block_delta',
+                    index: currentIndex,
+                    delta: { type: 'thinking_delta', thinking: event.text }
+                };
+                continue;
+            }
+
+            // --- Thinking signature ---------------------------------------
+            if (typeof event.signature === 'string' && currentType === 'thinking') {
+                yield {
+                    type: 'content_block_delta',
+                    index: currentIndex,
+                    delta: { type: 'signature_delta', signature: event.signature }
+                };
+                continue;
+            }
+
+            // --- Visible text content -------------------------------------
+            const text = extractEventText(event);
+            if (text) {
+                if (currentType !== 'text') {
+                    if (currentType !== null) {
+                        yield { type: 'content_block_stop', index: currentIndex };
+                    }
+                    currentIndex = nextIndex++;
+                    currentType = 'text';
+                    yield {
+                        type: 'content_block_start',
+                        index: currentIndex,
+                        content_block: { type: 'text', text: '' }
+                    };
+                }
+                yield {
+                    type: 'content_block_delta',
+                    index: currentIndex,
+                    delta: { type: 'text_delta', text }
+                };
+            }
+        }
+
+        // Ensure message_start was emitted even for empty responses
+        if (!hasStarted) {
+            yield startMessage();
+        }
+
+        // Close any still-open text/thinking block
+        if (currentType !== null) {
+            yield { type: 'content_block_stop', index: currentIndex };
+        }
+        // Close any tool blocks that never received an explicit stop
+        for (const idx of toolBlocks.values()) {
+            yield { type: 'content_block_stop', index: idx };
+        }
+
+        // Emit final message_delta with stop reason and usage
+        yield {
+            type: 'message_delta',
+            delta: { stop_reason: stopReason, stop_sequence: null },
+            usage: { output_tokens: outputTokens }
+        };
+
         yield { type: 'message_stop' };
-        
+
     } catch (error) {
         logger.error(`[Kiro] Streaming error: ${error.message}`);
         throw error;
@@ -213,116 +323,21 @@ async function* streamKiroResponse(response, requestModel) {
 }
 
 /**
- * Convert a Kiro/CodeWhisperer event to Anthropic SSE format
- * @param {Object} eventData - The Kiro event data (parsed JSON from binary stream)
- * @param {number} blockIndex - Current content block index
- * @param {boolean} hasOpenBlock - Whether there's an open content block
- * @returns {Array<Object>} Anthropic-format events
+ * Extract text content from a Kiro/CodeWhisperer stream event.
+ * @param {Object} event - Parsed event data
+ * @returns {string} Extracted text, or empty string
  */
-function convertKiroEventToAnthropic(eventData, blockIndex, hasOpenBlock) {
-    const events = [];
-    
-    // Direct content (simplified format from test output)
-    // Example: {"content":"Hello! How"}
-    if (eventData.content !== undefined && typeof eventData.content === 'string') {
-        events.push({
-            type: 'content_block_delta',
-            index: blockIndex,
-            delta: { type: 'text_delta', text: eventData.content }
-        });
-        return events;
+function extractEventText(event) {
+    if (typeof event.content === 'string') {
+        return event.content;
     }
-    
-    // Handle assistantResponseEvent format
-    if (eventData.assistantResponseEvent) {
-        const content = eventData.assistantResponseEvent.content;
-        if (content) {
-            events.push({
-                type: 'content_block_delta',
-                index: blockIndex,
-                delta: { type: 'text_delta', text: content }
-            });
-        }
-        return events;
+    if (event.assistantResponseEvent?.content) {
+        return event.assistantResponseEvent.content;
     }
-    
-    // Usage metadata (e.g., {"unit":"credit","usage":0.0022...})
-    if (eventData.usage !== undefined && eventData.unit !== undefined) {
-        // This is credit/usage info, not token counts
-        // We can log it but don't need to emit an Anthropic event
-        logger.debug(`[Kiro] Usage: ${eventData.usage} ${eventData.unitPlural || eventData.unit}`);
-        return events;
+    if (event.codeEvent?.content) {
+        return event.codeEvent.content;
     }
-    
-    // Token usage metadata
-    if (eventData.metadataEvent?.tokenUsage || eventData.tokenUsage) {
-        const usage = eventData.metadataEvent?.tokenUsage || eventData.tokenUsage;
-        events.push({
-            type: 'message_delta',
-            delta: {},
-            usage: {
-                input_tokens: usage.inputTokens || 0,
-                output_tokens: usage.outputTokens || 0
-            }
-        });
-        return events;
-    }
-    
-    // Tool use events
-    if (eventData.toolUseEvent || eventData.toolUse) {
-        const toolUse = eventData.toolUseEvent || eventData.toolUse;
-        
-        // Close any open text block first
-        if (hasOpenBlock) {
-            events.push({
-                type: 'content_block_stop',
-                index: blockIndex
-            });
-        }
-        
-        const newBlockIndex = blockIndex + 1;
-        
-        events.push({
-            type: 'content_block_start',
-            index: newBlockIndex,
-            content_block: {
-                type: 'tool_use',
-                id: toolUse.toolUseId || `toolu_${crypto.randomUUID().replace(/-/g, '').substring(0, 24)}`,
-                name: toolUse.name,
-                input: {}
-            }
-        });
-        
-        if (toolUse.input) {
-            events.push({
-                type: 'content_block_delta',
-                index: newBlockIndex,
-                delta: {
-                    type: 'input_json_delta',
-                    partial_json: JSON.stringify(toolUse.input)
-                }
-            });
-        }
-        
-        events.push({
-            type: 'content_block_stop',
-            index: newBlockIndex
-        });
-        
-        return events;
-    }
-    
-    // Code events
-    if (eventData.codeEvent) {
-        events.push({
-            type: 'content_block_delta',
-            index: blockIndex,
-            delta: { type: 'text_delta', text: eventData.codeEvent.content || '' }
-        });
-        return events;
-    }
-    
-    return events;
+    return '';
 }
 
 export default {

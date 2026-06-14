@@ -26,81 +26,156 @@ export function mapModelToKiro(anthropicModel) {
     }
     
     // Fuzzy matching for common patterns
-    if (lower.includes('opus') && lower.includes('4.6')) {
-        return 'claude-opus-4.6';
-    }
     if (lower.includes('opus')) {
-        return 'claude-opus-4.6';
+        if (lower.includes('4.8')) return 'claude-opus-4.8';
+        if (lower.includes('4.7')) return 'claude-opus-4.7';
+        if (lower.includes('4.6')) return 'claude-opus-4.6';
+        if (lower.includes('4.5')) return 'claude-opus-4.5';
+        // Default opus to the newest version
+        return 'claude-opus-4.8';
     }
-    if (lower.includes('sonnet') && lower.includes('4.5')) {
-        return 'claude-sonnet-4.5';
-    }
-    if (lower.includes('sonnet') && lower.includes('4')) {
-        return 'claude-sonnet-4';
+    if (lower.includes('sonnet')) {
+        if (lower.includes('4.8')) return 'claude-sonnet-4.8';
+        if (lower.includes('4.7')) return 'claude-sonnet-4.7';
+        if (lower.includes('4.5')) return 'claude-sonnet-4.5';
+        if (lower.includes('4')) return 'claude-sonnet-4';
+        // Default sonnet to the newest version
+        return 'claude-sonnet-4.8';
     }
     if (lower.includes('haiku')) {
+        if (lower.includes('4.7')) return 'claude-haiku-4.7';
         return 'claude-haiku-4.5';
     }
     
-    // Default to claude-opus-4.6 for unknown models
-    return 'claude-opus-4.6';
+    // Default to the newest Claude model for unknown models
+    return 'claude-opus-4.8';
 }
 
 /**
- * Convert Anthropic message format to Kiro/CodeWhisperer format
+ * Convert Anthropic tool definitions to CodeWhisperer toolSpecification format.
+ * @param {Array} tools - Anthropic-format tool definitions
+ * @returns {Array|undefined} CodeWhisperer tool specs, or undefined if none
+ */
+export function convertToolsToKiro(tools) {
+    if (!Array.isArray(tools) || tools.length === 0) {
+        return undefined;
+    }
+    return tools.map(tool => ({
+        toolSpecification: {
+            name: tool.name,
+            description: tool.description || '',
+            inputSchema: {
+                json: tool.input_schema || { type: 'object', properties: {} }
+            }
+        }
+    }));
+}
+
+/**
+ * Normalize the content of an Anthropic tool_result block into CodeWhisperer's
+ * toolResult content format ([{ text }] or [{ json }]).
+ * @param {*} content - The tool_result content (string, array, or object)
+ * @returns {Array<Object>} CodeWhisperer tool result content blocks
+ */
+function normalizeToolResultContent(content) {
+    if (typeof content === 'string') {
+        return [{ text: content }];
+    }
+    if (Array.isArray(content)) {
+        return content.map(item => {
+            if (typeof item === 'string') return { text: item };
+            if (item && item.type === 'text') return { text: item.text };
+            if (item && item.type === 'json') return { json: item.json ?? item };
+            return { json: item };
+        });
+    }
+    if (content && typeof content === 'object') {
+        return [{ json: content }];
+    }
+    return [{ text: String(content ?? '') }];
+}
+
+/**
+ * Process an Anthropic message's content into structured CodeWhisperer parts.
+ * Tool uses and tool results are preserved as structured data rather than being
+ * flattened into text, so the model can use native tool calling.
+ * @param {string|Array} content - The Anthropic message content
+ * @returns {{ text: string, toolUses: Array, toolResults: Array }}
+ */
+function processMessageContent(content) {
+    const result = { text: '', toolUses: [], toolResults: [] };
+
+    if (typeof content === 'string') {
+        result.text = content;
+        return result;
+    }
+    if (!Array.isArray(content)) {
+        return result;
+    }
+
+    const textParts = [];
+    for (const block of content) {
+        switch (block.type) {
+            case 'text':
+                textParts.push(block.text || '');
+                break;
+            case 'thinking':
+                textParts.push(`<thinking>${block.thinking}</thinking>`);
+                break;
+            case 'tool_use':
+                result.toolUses.push({
+                    toolUseId: block.id,
+                    name: block.name,
+                    input: block.input || {}
+                });
+                break;
+            case 'tool_result':
+                result.toolResults.push({
+                    toolUseId: block.tool_use_id,
+                    content: normalizeToolResultContent(block.content),
+                    status: block.is_error ? 'error' : 'success'
+                });
+                break;
+            case 'image':
+                // CodeWhisperer text endpoint can't accept images; note as placeholder
+                textParts.push('[Image attached]');
+                break;
+        }
+    }
+    result.text = textParts.join('\n');
+    return result;
+}
+
+/**
+ * Flatten an Anthropic system prompt (string or array of blocks) to text.
+ * @param {string|Array} system - The system prompt
+ * @returns {string} Flattened system text
+ */
+function flattenSystem(system) {
+    if (!system) return '';
+    if (typeof system === 'string') return system;
+    if (Array.isArray(system)) {
+        return system.map(s => (typeof s === 'string' ? s : s.text || '')).join('\n');
+    }
+    return String(system);
+}
+
+/**
+ * Convert Anthropic message format to structured CodeWhisperer messages.
  * @param {Object} anthropicRequest - The Anthropic-format request
- * @returns {Object} The CodeWhisperer-format request
+ * @returns {Object} Structured conversation data
  */
 export function convertAnthropicToKiro(anthropicRequest) {
     const messages = anthropicRequest.messages || [];
-    const system = anthropicRequest.system || '';
-    
-    // Build conversation history for CodeWhisperer
-    const conversationHistory = [];
-    
-    // Add system message if present
-    if (system) {
-        conversationHistory.push({
-            role: 'system',
-            content: typeof system === 'string' ? system : JSON.stringify(system)
-        });
-    }
-    
-    // Convert messages
-    for (const msg of messages) {
-        const role = msg.role === 'assistant' ? 'assistant' : 'user';
-        let content = '';
-        
-        if (typeof msg.content === 'string') {
-            content = msg.content;
-        } else if (Array.isArray(msg.content)) {
-            // Handle content blocks (text, images, tool_use, etc.)
-            const textParts = [];
-            for (const block of msg.content) {
-                if (block.type === 'text') {
-                    textParts.push(block.text);
-                } else if (block.type === 'thinking') {
-                    // Include thinking blocks as context
-                    textParts.push(`<thinking>${block.thinking}</thinking>`);
-                } else if (block.type === 'tool_use') {
-                    textParts.push(`<tool_use name="${block.name}">${JSON.stringify(block.input)}</tool_use>`);
-                } else if (block.type === 'tool_result') {
-                    textParts.push(`<tool_result tool_use_id="${block.tool_use_id}">${
-                        typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
-                    }</tool_result>`);
-                } else if (block.type === 'image') {
-                    // Images would need special handling for CodeWhisperer
-                    textParts.push('[Image attached]');
-                }
-            }
-            content = textParts.join('\n');
-        }
-        
-        conversationHistory.push({ role, content });
-    }
-    
+    const processed = messages.map(msg => ({
+        role: msg.role === 'assistant' ? 'assistant' : 'user',
+        ...processMessageContent(msg.content)
+    }));
+
     return {
-        conversationHistory,
+        systemText: flattenSystem(anthropicRequest.system),
+        messages: processed,
+        tools: convertToolsToKiro(anthropicRequest.tools),
         maxTokens: anthropicRequest.max_tokens || 8192,
         temperature: anthropicRequest.temperature,
         topP: anthropicRequest.top_p
@@ -108,24 +183,60 @@ export function convertAnthropicToKiro(anthropicRequest) {
 }
 
 /**
- * Build the CodeWhisperer chat request payload
+ * Build a CodeWhisperer history entry from a processed message.
+ * @param {Object} msg - Processed message ({ role, text, toolUses, toolResults })
+ * @returns {Object} CodeWhisperer history entry
+ */
+function buildHistoryEntry(msg) {
+    if (msg.role === 'assistant') {
+        const entry = { content: msg.text || '' };
+        if (msg.toolUses.length > 0) {
+            entry.toolUses = msg.toolUses;
+        }
+        return { assistantResponseMessage: entry };
+    }
+
+    const entry = { content: msg.text || '' };
+    if (msg.toolResults.length > 0) {
+        entry.userInputMessageContext = { toolResults: msg.toolResults };
+    }
+    return { userInputMessage: entry };
+}
+
+/**
+ * Build the CodeWhisperer chat request payload.
+ * Forwards tool definitions and tool results in CodeWhisperer's native format
+ * so the model performs real tool calling instead of emitting tool tags as text.
  * @param {Object} anthropicRequest - The Anthropic-format request
  * @returns {Object} The CodeWhisperer API request payload
  */
 export function buildKiroRequest(anthropicRequest) {
     const model = mapModelToKiro(anthropicRequest.model);
-    const converted = convertAnthropicToKiro(anthropicRequest);
-    
-    // Get the last user message as the prompt
-    const lastUserMessage = converted.conversationHistory
-        .filter(m => m.role === 'user')
-        .pop();
-    
-    const prompt = lastUserMessage?.content || '';
-    
-    // Build conversation state (excluding the last user message)
-    const previousMessages = converted.conversationHistory.slice(0, -1);
-    
+    const { systemText, messages, tools } = convertAnthropicToKiro(anthropicRequest);
+
+    // The final message is the current turn; everything before it is history.
+    const current = messages[messages.length - 1] || { role: 'user', text: '', toolUses: [], toolResults: [] };
+    const previous = messages.slice(0, -1);
+
+    // CodeWhisperer has no system role; prepend the system prompt to the
+    // current user message so it still steers the response.
+    let currentContent = current.text || '';
+    if (systemText) {
+        currentContent = currentContent
+            ? `${systemText}\n\n${currentContent}`
+            : systemText;
+    }
+
+    const userInputMessageContext = {
+        editorState: { cursorState: null }
+    };
+    if (tools) {
+        userInputMessageContext.tools = tools;
+    }
+    if (current.toolResults.length > 0) {
+        userInputMessageContext.toolResults = current.toolResults;
+    }
+
     return {
         conversationState: {
             conversationId: crypto.randomUUID(),
@@ -133,19 +244,13 @@ export function buildKiroRequest(anthropicRequest) {
             customizationArn: null,
             currentMessage: {
                 userInputMessage: {
-                    content: prompt,
-                    userInputMessageContext: {
-                        editorState: {
-                            cursorState: null
-                        }
-                    }
+                    content: currentContent,
+                    userInputMessageContext,
+                    modelId: model,
+                    origin: 'AI_EDITOR'
                 }
             },
-            history: previousMessages.map(msg => ({
-                [msg.role === 'assistant' ? 'assistantResponseMessage' : 'userInputMessage']: {
-                    content: msg.content
-                }
-            }))
+            history: previous.map(buildHistoryEntry)
         },
         profileArn: null,
         source: 'AI_EDITOR',
@@ -201,6 +306,7 @@ export function buildSimpleKiroRequest(prompt, model = 'auto') {
 export default {
     mapModelToKiro,
     convertAnthropicToKiro,
+    convertToolsToKiro,
     buildKiroRequest,
     buildKiroHeaders,
     buildSimpleKiroRequest

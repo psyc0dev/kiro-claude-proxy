@@ -157,9 +157,15 @@ claude
 
 | Model ID | Description |
 |----------|-------------|
+| `claude-opus-4-8` | Claude Opus 4.8 |
+| `claude-opus-4-7` | Claude Opus 4.7 |
+| `claude-opus-4-6` | Claude Opus 4.6 |
 | `claude-opus-4-5` | Claude Opus 4.5 |
+| `claude-sonnet-4-8` | Claude Sonnet 4.8 |
+| `claude-sonnet-4-7` | Claude Sonnet 4.7 |
 | `claude-sonnet-4-5` | Claude Sonnet 4.5 |
 | `claude-sonnet-4` | Claude Sonnet 4 |
+| `claude-haiku-4-7` | Claude Haiku 4.7 |
 | `claude-haiku-4-5` | Claude Haiku 4.5 |
 | `auto` | Let Kiro choose the best model |
 

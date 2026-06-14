@@ -138,30 +138,72 @@ export async function* parseEventStreamAsync(stream) {
 export function extractContentFromEvents(events) {
     let fullContent = '';
     let usage = { input_tokens: 0, output_tokens: 0 };
-    let toolUses = [];
-    
+
+    // Accumulate tool use input across events, keyed by tool use id.
+    const toolOrder = [];
+    const toolMap = new Map(); // toolUseId -> { id, name, inputParts: [] }
+
     for (const event of events) {
-        // Content events
-        if (event.content !== undefined) {
+        // Text content
+        if (typeof event.content === 'string') {
             fullContent += event.content;
+        } else if (event.assistantResponseEvent?.content) {
+            fullContent += event.assistantResponseEvent.content;
+        } else if (event.codeEvent?.content) {
+            fullContent += event.codeEvent.content;
         }
-        
-        // Usage/metering events
-        if (event.unit === 'credit' || event.usage !== undefined) {
-            usage.output_tokens = Math.round((event.usage || 0) * 1000); // Approximate
+
+        // Token usage
+        const tokenUsage = event.metadataEvent?.tokenUsage || event.tokenUsage;
+        if (tokenUsage) {
+            usage.input_tokens = tokenUsage.inputTokens || usage.input_tokens;
+            usage.output_tokens = tokenUsage.outputTokens || usage.output_tokens;
         }
-        
-        // Tool use events
-        if (event.toolUse || event.toolUseEvent) {
-            const toolUse = event.toolUse || event.toolUseEvent;
-            toolUses.push({
-                id: toolUse.toolUseId,
-                name: toolUse.name,
-                input: toolUse.input
-            });
+
+        // Tool use events (input may arrive in partial chunks). CodeWhisperer
+        // emits these flat: { name, toolUseId, input?, stop? }. Also accept
+        // legacy wrapped forms (toolUse / toolUseEvent).
+        const toolUse = event.toolUse || event.toolUseEvent ||
+            (event.toolUseId !== undefined ? event : null);
+        if (toolUse) {
+            const id = toolUse.toolUseId || `tool_${toolOrder.length}`;
+            if (!toolMap.has(id)) {
+                toolMap.set(id, { id, name: toolUse.name, inputParts: [] });
+                toolOrder.push(id);
+            }
+            const entry = toolMap.get(id);
+            if (toolUse.name && !entry.name) {
+                entry.name = toolUse.name;
+            }
+            if (toolUse.input !== undefined && toolUse.input !== null) {
+                entry.inputParts.push(toolUse.input);
+            }
         }
     }
-    
+
+    // Finalize tool uses: join partial input and parse JSON when possible.
+    const toolUses = toolOrder.map(id => {
+        const entry = toolMap.get(id);
+        let input = {};
+        if (entry.inputParts.length > 0) {
+            // If chunks are objects, take the last/merged object; if strings,
+            // concatenate and parse as JSON.
+            if (entry.inputParts.every(p => typeof p === 'object')) {
+                input = Object.assign({}, ...entry.inputParts);
+            } else {
+                const joined = entry.inputParts.map(p =>
+                    typeof p === 'string' ? p : JSON.stringify(p)
+                ).join('');
+                try {
+                    input = joined ? JSON.parse(joined) : {};
+                } catch {
+                    input = { _raw: joined };
+                }
+            }
+        }
+        return { id: entry.id, name: entry.name, input };
+    });
+
     return {
         content: fullContent,
         usage,

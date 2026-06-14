@@ -24,6 +24,46 @@ export async function listKiroModels() {
     // These are the Claude models available through AWS CodeWhisperer
     const models = [
         {
+            id: 'claude-opus-4-8',
+            created: Date.now(),
+            object: 'model',
+            owned_by: 'anthropic',
+            description: 'Claude Opus 4.8 - Most capable Claude model',
+            kiro_id: 'claude-opus-4.8'
+        },
+        {
+            id: 'claude-opus-4-7',
+            created: Date.now(),
+            object: 'model',
+            owned_by: 'anthropic',
+            description: 'Claude Opus 4.7',
+            kiro_id: 'claude-opus-4.7'
+        },
+        {
+            id: 'claude-sonnet-4-8',
+            created: Date.now(),
+            object: 'model',
+            owned_by: 'anthropic',
+            description: 'Claude Sonnet 4.8 - Balanced performance and speed',
+            kiro_id: 'claude-sonnet-4.8'
+        },
+        {
+            id: 'claude-sonnet-4-7',
+            created: Date.now(),
+            object: 'model',
+            owned_by: 'anthropic',
+            description: 'Claude Sonnet 4.7',
+            kiro_id: 'claude-sonnet-4.7'
+        },
+        {
+            id: 'claude-haiku-4-7',
+            created: Date.now(),
+            object: 'model',
+            owned_by: 'anthropic',
+            description: 'Claude Haiku 4.7 - Fastest Claude model',
+            kiro_id: 'claude-haiku-4.7'
+        },
+        {
             id: 'claude-opus-4-6',
             created: Date.now(),
             object: 'model',
@@ -75,6 +115,38 @@ export async function listKiroModels() {
     
     // Add thinking variants
     const thinkingModels = [
+        {
+            id: 'claude-opus-4-8-thinking',
+            created: Date.now(),
+            object: 'model',
+            owned_by: 'anthropic',
+            description: 'Claude Opus 4.8 with extended thinking',
+            kiro_id: 'claude-opus-4.8'
+        },
+        {
+            id: 'claude-opus-4-7-thinking',
+            created: Date.now(),
+            object: 'model',
+            owned_by: 'anthropic',
+            description: 'Claude Opus 4.7 with extended thinking',
+            kiro_id: 'claude-opus-4.7'
+        },
+        {
+            id: 'claude-sonnet-4-8-thinking',
+            created: Date.now(),
+            object: 'model',
+            owned_by: 'anthropic',
+            description: 'Claude Sonnet 4.8 with extended thinking',
+            kiro_id: 'claude-sonnet-4.8'
+        },
+        {
+            id: 'claude-sonnet-4-7-thinking',
+            created: Date.now(),
+            object: 'model',
+            owned_by: 'anthropic',
+            description: 'Claude Sonnet 4.7 with extended thinking',
+            kiro_id: 'claude-sonnet-4.7'
+        },
         {
             id: 'claude-opus-4-6-thinking',
             created: Date.now(),
